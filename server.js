@@ -28,12 +28,10 @@ app.post("/slack/fixdoc", async (req, res) => {
 
 async function processFixdocCommand(text, username, response_url) {
   try {
-    const [inputPath, ...issueParts] = text.trim().split(" ");
-    const issue = issueParts.join(" ").trim();
-
+    const { inputPath, issue } = parseFixdocText(text);
     const normalizedPath = normalizeDocPath(inputPath);
-    const { content, filePath, sha } = await fetchMarkdown(normalizedPath);
 
+    const { content, filePath, sha } = await fetchMarkdown(normalizedPath);
     const suggestion = await getOpenAISuggestion(issue, content);
     const prUrl = await createPR(filePath, suggestion, username, sha);
 
@@ -44,18 +42,28 @@ async function processFixdocCommand(text, username, response_url) {
   }
 }
 
+// Robust parser: splits path and issue correctly
+function parseFixdocText(text) {
+  const trimmed = text.trim();
+  const spaceIndex = trimmed.indexOf(" ");
+  const inputPath = trimmed.slice(0, spaceIndex !== -1 ? spaceIndex : undefined).trim();
+  const issue = spaceIndex !== -1 ? trimmed.slice(spaceIndex + 1).trim() : "";
+
+  if (!inputPath) throw new Error("Please provide a valid path.");
+  return { inputPath, issue };
+}
+
+// Accepts full docs URL or partial path
 function normalizeDocPath(path) {
   try {
-    // Accepts: full docs URL or relative path
     if (path.startsWith("http")) {
       const url = new URL(path);
       path = url.pathname;
     }
-
     if (!path.startsWith("/")) path = "/" + path;
     return path;
   } catch {
-    return path; // fallback if URL parsing fails
+    return path;
   }
 }
 
@@ -93,7 +101,7 @@ async function fetchMarkdown(docPath) {
 
 async function getOpenAISuggestion(issue, content) {
   const prompt = `
-A user reported an issue in the following markdown content.
+A user found an issue in the following markdown content.
 
 --- Markdown Content ---
 ${content}
@@ -101,7 +109,7 @@ ${content}
 --- Issue Description ---
 ${issue}
 
---- Please fix the content accordingly ---
+--- Fix the content below ---
 `;
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
