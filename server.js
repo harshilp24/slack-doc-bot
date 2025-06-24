@@ -37,17 +37,16 @@ async function processFixdocCommand(text, username, response_url) {
 
     await postToSlack(response_url, `✅ PR created: ${prUrl}`);
   } catch (err) {
-    console.error(err);
+    console.error("❌ Bot Error:", err.message);
     await postToSlack(response_url, `❌ Error: ${err.message}`);
   }
 }
 
-// ✅ FIXED: handles newlines, tabs, and extra whitespace
 function parseFixdocText(text) {
-  const trimmed = text.trim().replace(/\s+/g, " "); // Normalize newlines/spaces
-  const spaceIndex = trimmed.indexOf(" ");
-  const inputPath = trimmed.slice(0, spaceIndex !== -1 ? spaceIndex : undefined).trim();
-  const issue = spaceIndex !== -1 ? trimmed.slice(spaceIndex + 1).trim() : "";
+  const normalized = text.trim().replace(/\r?\n/g, " ").replace(/\s+/g, " ");
+  const spaceIndex = normalized.indexOf(" ");
+  const inputPath = normalized.slice(0, spaceIndex !== -1 ? spaceIndex : undefined).trim();
+  const issue = spaceIndex !== -1 ? normalized.slice(spaceIndex + 1).trim() : "";
 
   if (!inputPath) throw new Error("Please provide a valid path.");
   return { inputPath, issue };
@@ -74,7 +73,7 @@ async function fetchMarkdown(docPath) {
   for (const ext of exts) {
     candidates.push(`${fileBase}${ext}`);
 
-    // Also try capitalized last segment
+    // Try capitalized last segment too
     const capitalized = fileBase.replace(/\/([^/]+)$/, (_, name) => `/${name.charAt(0).toUpperCase()}${name.slice(1)}`);
     candidates.push(`${capitalized}${ext}`);
   }
@@ -90,6 +89,7 @@ async function fetchMarkdown(docPath) {
 
     if (res.ok) {
       const json = await res.json();
+      if (!json.content || !json.sha) throw new Error(`GitHub response missing content/sha`);
       const content = Buffer.from(json.content, "base64").toString("utf-8");
       return { content, filePath, sha: json.sha };
     }
@@ -100,15 +100,44 @@ async function fetchMarkdown(docPath) {
 
 async function getOpenAISuggestion(issue, content) {
   const prompt = `
-A user found an issue in the following markdown content.
+You are a senior technical writer contributing to official product documentation.
 
---- Markdown Content ---
+Follow these strict rules while editing the markdown content:
+
+## ✍️ Style and Structure Guidelines
+
+- Use the [Diátaxis documentation framework](https://diataxis.fr/) — keep content instructional, with clear purpose (tutorial, reference, guide, or explanation).
+- Follow the [Google Developer Documentation Style Guide](https://developers.google.com/style) for tone, clarity, terminology, punctuation, and formatting.
+- Be clear, concise, and consistent.
+- Use present tense and active voice.
+- Headings must be in sentence case, not title case.
+- Never use "we", "our", or "you should".
+- Use second person ("you") sparingly and only when instructional.
+- Format all inline code, URLs, filenames, or settings using backticks.
+- If adding new sections, ensure they match existing formatting (e.g. \`## Automated execution\`, or similar).
+- Maintain Appsmith’s documentation tone and language.
+
+---
+
+## 🧾 Original Markdown Content
+
 ${content}
 
---- Issue Description ---
+---
+
+## 🐞 User Reported Issue
+
 ${issue}
 
---- Fix the content accordingly ---
+---
+
+## ✅ Instructions
+
+Update the markdown content accordingly. Do not reply with comments or analysis — only return the **entire modified markdown content** (even if only one line changed). Keep unchanged content intact.
+
+If you're adding a new section, place it where it best fits the page’s flow.
+
+Be professional, structured, and editorially consistent.
 `;
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -125,7 +154,12 @@ ${issue}
   });
 
   const json = await res.json();
-  if (!json.choices) throw new Error("❌ OpenAI did not return any suggestions.");
+
+  if (!json.choices || !json.choices.length) {
+    console.error("❌ OpenAI Error:", JSON.stringify(json, null, 2));
+    throw new Error("❌ OpenAI did not return any suggestions.");
+  }
+
   return json.choices[0].message.content;
 }
 
@@ -134,6 +168,7 @@ async function createPR(filePath, updatedContent, username, sha) {
   const branch = `fixdoc-${Date.now()}`;
 
   const baseRef = await octokit.git.getRef({ owner, repo, ref: "heads/main" });
+
   await octokit.git.createRef({
     owner,
     repo,
