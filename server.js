@@ -44,12 +44,22 @@ async function processFixdocCommand(text, username, response_url) {
 
 async function fetchMarkdown(path) {
   const exts = [".md", ".mdx"];
-  const basePath = `website/docs${path}`;
+  const base = `website/docs${path}`;
+  const pathVariants = [];
 
   for (const ext of exts) {
-    const filePath = `${basePath}${ext}`;
-    const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`;
+    // 1. Exact case
+    pathVariants.push(`${base}${ext}`);
 
+    // 2. Capitalized filename
+    const capitalized = base.replace(/\/([^/]+)$/, (_, name) =>
+      `/${name.charAt(0).toUpperCase()}${name.slice(1)}`
+    );
+    pathVariants.push(`${capitalized}${ext}`);
+  }
+
+  for (const filePath of pathVariants) {
+    const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`;
     const res = await fetch(url, {
       headers: {
         Authorization: `Bearer ${GITHUB_TOKEN}`,
@@ -64,7 +74,7 @@ async function fetchMarkdown(path) {
     }
   }
 
-  throw new Error(`❌ Could not find a .md or .mdx file for: ${basePath}`);
+  throw new Error(`❌ Could not find a .md or .mdx file for: ${base}`);
 }
 
 async function getOpenAISuggestion(issue, content) {
