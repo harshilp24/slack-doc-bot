@@ -28,10 +28,12 @@ app.post("/slack/fixdoc", async (req, res) => {
 
 async function processFixdocCommand(text, username, response_url) {
   try {
-    const [path, ...issueParts] = text.trim().split(" ");
+    const [inputPath, ...issueParts] = text.trim().split(" ");
     const issue = issueParts.join(" ").trim();
 
-    const { content, filePath, sha } = await fetchMarkdown(path);
+    const normalizedPath = normalizeDocPath(inputPath);
+    const { content, filePath, sha } = await fetchMarkdown(normalizedPath);
+
     const suggestion = await getOpenAISuggestion(issue, content);
     const prUrl = await createPR(filePath, suggestion, username, sha);
 
@@ -42,23 +44,35 @@ async function processFixdocCommand(text, username, response_url) {
   }
 }
 
-async function fetchMarkdown(path) {
+function normalizeDocPath(path) {
+  try {
+    // Accepts: full docs URL or relative path
+    if (path.startsWith("http")) {
+      const url = new URL(path);
+      path = url.pathname;
+    }
+
+    if (!path.startsWith("/")) path = "/" + path;
+    return path;
+  } catch {
+    return path; // fallback if URL parsing fails
+  }
+}
+
+async function fetchMarkdown(docPath) {
+  const fileBase = `website/docs${docPath}`;
   const exts = [".md", ".mdx"];
-  const base = `website/docs${path}`;
-  const pathVariants = [];
+  const candidates = [];
 
   for (const ext of exts) {
-    // 1. Exact case
-    pathVariants.push(`${base}${ext}`);
+    candidates.push(`${fileBase}${ext}`);
 
-    // 2. Capitalized filename
-    const capitalized = base.replace(/\/([^/]+)$/, (_, name) =>
-      `/${name.charAt(0).toUpperCase()}${name.slice(1)}`
-    );
-    pathVariants.push(`${capitalized}${ext}`);
+    // Also try capitalized last segment
+    const capitalized = fileBase.replace(/\/([^/]+)$/, (_, name) => `/${name.charAt(0).toUpperCase()}${name.slice(1)}`);
+    candidates.push(`${capitalized}${ext}`);
   }
 
-  for (const filePath of pathVariants) {
+  for (const filePath of candidates) {
     const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`;
     const res = await fetch(url, {
       headers: {
@@ -74,12 +88,12 @@ async function fetchMarkdown(path) {
     }
   }
 
-  throw new Error(`❌ Could not find a .md or .mdx file for: ${base}`);
+  throw new Error(`❌ Could not find a .md or .mdx file for: ${docPath}`);
 }
 
 async function getOpenAISuggestion(issue, content) {
   const prompt = `
-A user found an issue in the following markdown content.
+A user reported an issue in the following markdown content.
 
 --- Markdown Content ---
 ${content}
@@ -87,7 +101,7 @@ ${content}
 --- Issue Description ---
 ${issue}
 
---- Fix the content below ---
+--- Please fix the content accordingly ---
 `;
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
