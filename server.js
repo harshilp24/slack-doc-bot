@@ -30,11 +30,10 @@ async function processFixdocCommand(text, username, response_url) {
   try {
     const [path, ...issueParts] = text.trim().split(" ");
     const issue = issueParts.join(" ").trim();
-    const fullPath = `docs${path}.mdx`;
 
-    const content = await fetchMarkdown(fullPath);
+    const { content, filePath, sha } = await fetchMarkdown(path);
     const suggestion = await getOpenAISuggestion(issue, content);
-    const prUrl = await createPR(fullPath, suggestion, username);
+    const prUrl = await createPR(filePath, suggestion, username, sha);
 
     await postToSlack(response_url, `✅ PR created: ${prUrl}`);
   } catch (err) {
@@ -43,17 +42,29 @@ async function processFixdocCommand(text, username, response_url) {
   }
 }
 
-async function fetchMarkdown(filePath) {
-  const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`;
-  const res = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${GITHUB_TOKEN}`,
-      Accept: "application/vnd.github.v3.raw",
-    }
-  });
+async function fetchMarkdown(path) {
+  const exts = [".md", ".mdx"];
+  const basePath = `website/docs${path}`;
 
-  if (!res.ok) throw new Error("Unable to fetch file from GitHub");
-  return await res.text();
+  for (const ext of exts) {
+    const filePath = `${basePath}${ext}`;
+    const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`;
+
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${GITHUB_TOKEN}`,
+        Accept: "application/vnd.github.v3+json"
+      }
+    });
+
+    if (res.ok) {
+      const json = await res.json();
+      const content = Buffer.from(json.content, "base64").toString("utf-8");
+      return { content, filePath, sha: json.sha };
+    }
+  }
+
+  throw new Error(`❌ Could not find a .md or .mdx file for: ${basePath}`);
 }
 
 async function getOpenAISuggestion(issue, content) {
@@ -83,10 +94,11 @@ ${issue}
   });
 
   const json = await res.json();
+  if (!json.choices) throw new Error("❌ OpenAI did not return any suggestions.");
   return json.choices[0].message.content;
 }
 
-async function createPR(filePath, updatedContent, username) {
+async function createPR(filePath, updatedContent, username, sha) {
   const [owner, repo] = GITHUB_REPO.split("/");
   const branch = `fixdoc-${Date.now()}`;
 
@@ -98,14 +110,13 @@ async function createPR(filePath, updatedContent, username) {
     sha: baseRef.data.object.sha
   });
 
-  const { data: file } = await octokit.repos.getContent({ owner, repo, path: filePath, ref: "main" });
   await octokit.repos.createOrUpdateFileContents({
     owner,
     repo,
     path: filePath,
-    message: `fix: ${filePath} via Slack`,
+    message: `fix: ${filePath} via Slack bot`,
     content: Buffer.from(updatedContent).toString("base64"),
-    sha: file.sha,
+    sha,
     branch
   });
 
@@ -115,7 +126,7 @@ async function createPR(filePath, updatedContent, username) {
     title: `Fix ${filePath} via Slack`,
     head: branch,
     base: "main",
-    body: `Reported by ${username} via Slack bot`
+    body: `Reported by @${username} via Slack bot`
   });
 
   return pr.html_url;
