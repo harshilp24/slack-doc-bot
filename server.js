@@ -42,9 +42,9 @@ async function processFixdocCommand(text, username, response_url) {
   }
 }
 
-// Robust parser: splits path and issue correctly
+// ✅ FIXED: handles newlines, tabs, and extra whitespace
 function parseFixdocText(text) {
-  const trimmed = text.trim();
+  const trimmed = text.trim().replace(/\s+/g, " "); // Normalize newlines/spaces
   const spaceIndex = trimmed.indexOf(" ");
   const inputPath = trimmed.slice(0, spaceIndex !== -1 ? spaceIndex : undefined).trim();
   const issue = spaceIndex !== -1 ? trimmed.slice(spaceIndex + 1).trim() : "";
@@ -53,7 +53,6 @@ function parseFixdocText(text) {
   return { inputPath, issue };
 }
 
-// Accepts full docs URL or partial path
 function normalizeDocPath(path) {
   try {
     if (path.startsWith("http")) {
@@ -109,7 +108,7 @@ ${content}
 --- Issue Description ---
 ${issue}
 
---- Fix the content below ---
+--- Fix the content accordingly ---
 `;
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
