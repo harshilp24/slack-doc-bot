@@ -1,29 +1,28 @@
 import { unified } from "unified";
-import parse from "remark-parse";
-import stringify from "remark-stringify";
+import remarkParse from "remark-parse";
+import { visit } from "unist-util-visit";
 
-export async function extractSection(markdown, headingText) {
-  const tree = unified().use(parse).parse(markdown);
+export function extractSection(content, issue) {
+  const lines = content.split("\n");
+  const lowerIssue = issue.toLowerCase();
 
-  const sectionNodes = [];
-  let capture = false;
+  let sectionStart = -1;
+  let sectionEnd = lines.length;
+  let sectionHeading = "";
 
-  for (const node of tree.children) {
-    if (node.type === "heading" && node.depth === 3) {
-      const title = node.children.map((c) => c.value).join("");
-      if (title.includes(headingText)) {
-        capture = true;
-      } else if (capture) {
+  for (let i = 0; i < lines.length; i++) {
+    if (/^##+\s/.test(lines[i])) {
+      if (sectionStart === -1 && lowerIssue.includes(lines[i].toLowerCase())) {
+        sectionStart = i;
+        sectionHeading = lines[i];
+      } else if (sectionStart !== -1) {
+        sectionEnd = i;
         break;
       }
     }
-    if (capture) sectionNodes.push(node);
   }
 
-  if (!sectionNodes.length) throw new Error(`Section "${headingText}" not found.`);
-
-  const sectionTree = { type: "root", children: sectionNodes };
-  const sectionMarkdown = unified().use(stringify).stringify(sectionTree);
-
-  return { sectionMarkdown, sectionNodes };
+  if (sectionStart === -1) return { section: null };
+  const section = lines.slice(sectionStart, sectionEnd).join("\n");
+  return { section, sectionHeading };
 }

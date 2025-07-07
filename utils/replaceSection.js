@@ -1,15 +1,21 @@
-import { unified } from "unified";
-import parse from "remark-parse";
-import stringify from "remark-stringify";
+export function replaceSection(content, heading, newSection) {
+  const lines = content.split("\n");
+  const startIndex = lines.findIndex(line => line.trim() === heading.trim());
+  if (startIndex === -1) throw new Error("Failed to locate section to replace.");
 
-export function replaceSection(originalMarkdown, oldNodes, newMarkdown) {
-  const tree = unified().use(parse).parse(originalMarkdown);
-  const newTree = unified().use(parse).parse(newMarkdown);
+  let endIndex = lines.length;
+  for (let i = startIndex + 1; i < lines.length; i++) {
+    if (/^##+\s/.test(lines[i])) {
+      endIndex = i;
+      break;
+    }
+  }
 
-  const startIdx = tree.children.findIndex((n) => n === oldNodes[0]);
-  if (startIdx === -1) throw new Error("Section not found in original AST.");
+  const updatedLines = [
+    ...lines.slice(0, startIndex),
+    ...newSection.split("\n"),
+    ...lines.slice(endIndex)
+  ];
 
-  tree.children.splice(startIdx, oldNodes.length, ...newTree.children);
-
-  return unified().use(stringify).stringify(tree);
+  return updatedLines.join("\n");
 }
