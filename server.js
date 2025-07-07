@@ -3,7 +3,8 @@ import bodyParser from "body-parser";
 import dotenv from "dotenv";
 import fetch from "node-fetch";
 import { Octokit } from "@octokit/rest";
-import similarity from "string-similarity";
+import fs from "fs/promises";
+import path from "path";
 
 dotenv.config();
 
@@ -14,10 +15,9 @@ const PORT = process.env.PORT || 3000;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const GITHUB_REPO = "appsmithorg/appsmith-docs";
-const REPO_PATH = "website/docs";
-const octokit = new Octokit({ auth: GITHUB_TOKEN });
+const PROMPT_PATH = path.join(process.cwd(), "prompts", "fixdoc_prompt.txt");
 
-let knownDocs = [];
+const octokit = new Octokit({ auth: GITHUB_TOKEN });
 
 app.get("/", (_, res) => res.send("Slack bot is running ✅"));
 
@@ -34,9 +34,11 @@ async function processFixdocCommand(text, username, response_url) {
   try {
     const { inputPath, issue } = parseFixdocText(text);
     const normalizedPath = normalizeDocPath(inputPath);
-    const { content, filePath, sha } = await fetchBestMatchFile(normalizedPath);
+
+    const { content, filePath, sha } = await fetchMarkdown(normalizedPath);
     const suggestion = await getOpenAISuggestion(issue, content, filePath);
     const prUrl = await createPR(filePath, suggestion, username, sha);
+
     await postToSlack(response_url, `✅ PR created: ${prUrl}`);
   } catch (err) {
     console.error("❌ Bot Error:", err.message);
@@ -49,6 +51,7 @@ function parseFixdocText(text) {
   const spaceIndex = normalized.indexOf(" ");
   const inputPath = normalized.slice(0, spaceIndex !== -1 ? spaceIndex : undefined).trim();
   const issue = spaceIndex !== -1 ? normalized.slice(spaceIndex + 1).trim() : "";
+
   if (!inputPath) throw new Error("Please provide a valid path.");
   return { inputPath, issue };
 }
@@ -66,98 +69,44 @@ function normalizeDocPath(path) {
   }
 }
 
-async function fetchBestMatchFile(userPath) {
-  if (!knownDocs.length) await preloadKnownFiles();
+async function fetchMarkdown(docPath) {
+  const fileBase = `website/docs${docPath}`;
+  const exts = [".md", ".mdx"];
+  const candidates = [];
 
-  const scores = knownDocs.map(file => ({
-    file,
-    score: similarity.compareTwoStrings(file.docPath, userPath)
-  }));
+  for (const ext of exts) {
+    candidates.push(`${fileBase}${ext}`);
+    const capitalized = fileBase.replace(/\/([^/]+)$/, (_, name) => `/${name.charAt(0).toUpperCase()}${name.slice(1)}`);
+    candidates.push(`${capitalized}${ext}`);
+  }
 
-  scores.sort((a, b) => b.score - a.score);
-  const best = scores[0];
-  if (best.score < 0.5) throw new Error(`❌ No close match found for: ${userPath}`);
+  for (const filePath of candidates) {
+    const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`;
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${GITHUB_TOKEN}`,
+        Accept: "application/vnd.github.v3+json"
+      }
+    });
 
-  const { filePath } = best.file;
-  const url = `https://api.github.com/repos/${GITHUB_REPO}/contents/${filePath}`;
-  const res = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${GITHUB_TOKEN}`,
-      Accept: "application/vnd.github.v3+json"
-    }
-  });
-
-  if (!res.ok) throw new Error(`❌ GitHub fetch failed for: ${filePath}`);
-  const json = await res.json();
-  const content = Buffer.from(json.content, "base64").toString("utf-8");
-
-  return { content, filePath, sha: json.sha };
-}
-
-async function preloadKnownFiles() {
-  const files = await fetchDocsFromRepo(REPO_PATH);
-  knownDocs = files.filter(f => f.name.endsWith(".md") || f.name.endsWith(".mdx")).map(f => ({
-    docPath: "/" + f.path.replace("website/docs", "").replace(/\.(md|mdx)$/, ""),
-    filePath: f.path
-  }));
-}
-
-async function fetchDocsFromRepo(path, acc = []) {
-  const res = await fetch(`https://api.github.com/repos/${GITHUB_REPO}/contents/${path}`, {
-    headers: { Authorization: `Bearer ${GITHUB_TOKEN}` }
-  });
-
-  if (!res.ok) return acc;
-
-  const items = await res.json();
-  for (const item of items) {
-    if (item.type === "file") {
-      acc.push({ path: item.path, name: item.name });
-    } else if (item.type === "dir") {
-      await fetchDocsFromRepo(item.path, acc);
+    if (res.ok) {
+      const json = await res.json();
+      if (!json.content || !json.sha) throw new Error(`GitHub response missing content/sha`);
+      const content = Buffer.from(json.content, "base64").toString("utf-8");
+      return { content, filePath, sha: json.sha };
     }
   }
-  return acc;
+
+  throw new Error(`❌ Could not find a .md or .mdx file for: ${docPath}`);
 }
 
 async function getOpenAISuggestion(issue, content, filePath) {
-  const fileName = filePath.split("/").pop();
-  const prompt = `
-You are a senior technical writer. You are contributing to Appsmith's open-source documentation at \`${filePath}\`.
+  const template = await fs.readFile(PROMPT_PATH, "utf-8");
 
-Please follow these rules:
-
----
-
-## ✍️ Editorial Guidelines
-
-- Structure content using [Diátaxis](https://diataxis.fr/).
-- Follow [Google Developer Style Guide](https://developers.google.com/style) for clarity and tone.
-- Be direct, instructional, and precise.
-- Headings must use sentence case.
-- Avoid "we", "our", "you should", or first-person plural.
-- Use backticks for inline code or UI labels.
-- New sections should follow existing markdown formatting.
-- Use examples or lists if needed to explain concepts.
-
----
-
-## 🐞 Reported Issue
-
-${issue}
-
----
-
-## 📄 Original Markdown
-
-${content}
-
----
-
-## ✅ Response Instructions
-
-Revise the **entire markdown** file to address the issue. Return updated markdown only — no comments, no explanation.
-`;
+  const prompt = template
+    .replace("{{file_path}}", filePath)
+    .replace("{{issue}}", issue)
+    .replace("{{original_content}}", content);
 
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -173,9 +122,10 @@ Revise the **entire markdown** file to address the issue. Return updated markdow
   });
 
   const json = await res.json();
+
   if (!json.choices || !json.choices.length) {
-    console.error("OpenAI Error:", json);
-    throw new Error("❌ OpenAI did not return suggestions.");
+    console.error("❌ OpenAI Error:", JSON.stringify(json, null, 2));
+    throw new Error("❌ OpenAI did not return any suggestions.");
   }
 
   return json.choices[0].message.content;
@@ -184,6 +134,7 @@ Revise the **entire markdown** file to address the issue. Return updated markdow
 async function createPR(filePath, updatedContent, username, sha) {
   const [owner, repo] = GITHUB_REPO.split("/");
   const branch = `fixdoc-${Date.now()}`;
+
   const baseRef = await octokit.git.getRef({ owner, repo, ref: "heads/main" });
 
   await octokit.git.createRef({
@@ -223,8 +174,4 @@ async function postToSlack(url, text) {
   });
 }
 
-app.listen(PORT, async () => {
-  console.log(`🚀 Slack bot running on port ${PORT}`);
-  await preloadKnownFiles();
-  console.log(`📂 Indexed ${knownDocs.length} docs for fuzzy matching`);
-});
+app.listen(PORT, () => console.log(`🚀 Slack bot running on port ${PORT}`));
